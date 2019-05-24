@@ -1,4 +1,16 @@
-use std::io::{BufRead, Result as IoResult, Write};
+use std::io::{BufRead, Write};
+
+#[derive(Debug)]
+pub enum PostfixPolicyError {
+    IoError(std::io::Error),
+    InvalidLine(Vec<u8>),
+}
+
+impl std::convert::From<std::io::Error> for PostfixPolicyError {
+    fn from(e: std::io::Error) -> PostfixPolicyError {
+        PostfixPolicyError::IoError(e)
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum PolicyResponse {
@@ -147,7 +159,7 @@ pub fn handle_connection<'l, HandlerType, HandlerParamType, RS: BufRead, WS: Wri
     mut reader: RS,
     writer: &mut WS,
     param: &'l HandlerParamType,
-) -> IoResult<()>
+) -> Result<(), PostfixPolicyError>
 where
     HandlerType: PolicyRequestHandler<'l, HandlerParamType>,
 {
@@ -170,15 +182,11 @@ where
         }
 
         match buf.iter().position(|&c| c == b'=') {
-            None => {
-                println!("Read invalid line, cancelling connection: {:?}", buf);
-                return Ok(());
-            }
+            None => return Err(PostfixPolicyError::InvalidLine(buf)),
             Some(pos) => {
                 let (left, mut right) = buf.split_at(pos);
-                if right.len() < 2 {
-                    println!("Read invalid line, cancelling connection: {:?}", buf);
-                    return Ok(());
+                if left.len() == 0 || right.len() < 2 {
+                    return Err(PostfixPolicyError::InvalidLine(buf));
                 }
                 right = &right[1..right.len() - 1];
                 ctx.parse_line(left, right);
@@ -187,12 +195,30 @@ where
     }
 }
 
+pub mod test_helper {
+    use super::{handle_connection, PostfixPolicyError, PolicyRequestHandler};
+    use std::io::BufReader;
+    use std::io::Cursor;
+
+    pub fn handle_connection_response<'l, HandlerType, HandlerParamType>(
+        input: &[u8],
+        config: &'l HandlerParamType,
+    ) -> Result<Vec<u8>, PostfixPolicyError>
+    where
+        HandlerType: PolicyRequestHandler<'l, HandlerParamType>,
+    {
+        let reader = BufReader::new(input);
+        let mut output = Cursor::new(vec![]);
+        handle_connection::<HandlerType, HandlerParamType, _, _>(reader, &mut output, config)?;
+        Ok(output.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
-    use super::{handle_connection, PolicyRequestHandler, PolicyResponse};
-    use std::io::BufReader;
-    use std::io::Cursor;
+    use super::{PolicyResponse, PostfixPolicyError, PolicyRequestHandler};
+    use super::test_helper::handle_connection_response;
 
     struct DummyRequestHandler {
         found_request: bool,
@@ -222,16 +248,47 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_connection() {
-        let mut input: Vec<u8> = vec![];
-        input.extend_from_slice(b"request=smtpd_access_policy\n");
-        input.extend_from_slice(b"protocol_state=RCPT\n");
-        input.extend_from_slice(b"protocol_name=ESMTP\n");
-        input.extend_from_slice(b"client_address=131.234.189.14\n\n");
+    fn test_handle_connection_valid() {
+        let input =
+            b"request=smtpd_access_policy\nprotocol_state=RCPT\nprotocol_name=ESMTP\nclient_address=131.234.189.14\n\n";
+        assert_eq!(
+            handle_connection_response::<DummyRequestHandler, _>(input, &()).unwrap(),
+            b"action=DEFER 131.234.189.14\n\n"
+        );
+    }
 
-        let reader = BufReader::new(Cursor::new(input));
-        let mut output = Cursor::new(vec![]);
-        handle_connection::<DummyRequestHandler, _, _, _>(reader, &mut output, &()).unwrap();
-        assert_eq!(output.into_inner(), b"action=DEFER 131.234.189.14\n\n");
+    #[test]
+    fn test_handle_connection_empty() {
+        let input = b"\n";
+        assert_eq!(
+            handle_connection_response::<DummyRequestHandler, _>(input, &()).unwrap(),
+            b"action=REJECT\n\n"
+        );
+    }
+
+    #[test]
+    fn test_handle_connection_line_without_eq() {
+        let input = b"asdf\n\n";
+
+        assert!(match handle_connection_response::<DummyRequestHandler, _>(input, &()) {
+            Err(PostfixPolicyError::InvalidLine(l)) => {
+                assert_eq!(&l, b"asdf\n");
+                true
+            }
+            _ => false,
+        });
+    }
+
+    #[test]
+    fn test_handle_connection_line_empty_name() {
+        let input = b"=a\n\n";
+
+        assert!(match handle_connection_response::<DummyRequestHandler, _>(input, &()) {
+            Err(PostfixPolicyError::InvalidLine(l)) => {
+                assert_eq!(&l, b"=a\n");
+                true
+            }
+            _ => false,
+        });
     }
 }
