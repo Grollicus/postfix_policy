@@ -82,7 +82,7 @@ fn serialize_response(resp: PolicyResponse) -> Vec<u8> {
         }
     };
     let mut resp = Vec::from(action);
-    if message.len() != 0 {
+    if !message.is_empty() {
         resp.push(b' ');
         resp.extend_from_slice(&message);
     }
@@ -185,7 +185,7 @@ where
             None => return Err(PostfixPolicyError::InvalidLine(buf)),
             Some(pos) => {
                 let (left, mut right) = buf.split_at(pos);
-                if left.len() == 0 || right.len() < 2 {
+                if left.is_empty() || right.len() < 2 {
                     return Err(PostfixPolicyError::InvalidLine(buf));
                 }
                 right = &right[1..right.len() - 1];
@@ -196,7 +196,7 @@ where
 }
 
 pub mod test_helper {
-    use super::{handle_connection, PostfixPolicyError, PolicyRequestHandler};
+    use super::{handle_connection, PolicyRequestHandler, PostfixPolicyError};
     use std::io::BufReader;
     use std::io::Cursor;
 
@@ -217,8 +217,8 @@ pub mod test_helper {
 #[cfg(test)]
 mod tests {
 
-    use super::{PolicyResponse, PostfixPolicyError, PolicyRequestHandler};
     use super::test_helper::handle_connection_response;
+    use super::{PolicyRequestHandler, PolicyResponse, PostfixPolicyError};
 
     struct DummyRequestHandler {
         found_request: bool,
