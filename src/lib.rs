@@ -1,14 +1,19 @@
 use std::io::{BufRead, Result as IoResult, Write};
 
-// TODO add all responses from http://www.postfix.org/access.5.html
 #[derive(Debug, PartialEq)]
 pub enum PolicyResponse {
     Ok,
-    Reject,
-    RejectWithMessage(Vec<u8>),
-    Defer,
-    DeferWithMessage(Vec<u8>),
+    Reject(Vec<u8>),
+    Defer(Vec<u8>),
+    DeferIfReject(Vec<u8>),
+    DeferIfPermit(Vec<u8>),
+    Bcc(Vec<u8>),
+    Discard(Vec<u8>),
     Dunno,
+    Hold(Vec<u8>),
+    Redirect(Vec<u8>),
+    Info(Vec<u8>),
+    Warn(Vec<u8>),
 }
 
 pub trait PolicyRequestHandler<'l, T> {
@@ -19,38 +24,123 @@ pub trait PolicyRequestHandler<'l, T> {
 }
 
 fn serialize_response(resp: PolicyResponse) -> Vec<u8> {
-    match resp {
-        PolicyResponse::Ok => b"OK".to_vec(),
-        PolicyResponse::Reject => b"REJECT".to_vec(),
-        PolicyResponse::RejectWithMessage(msg) => {
-            let mut r = b"REJECT ".to_vec();
-            r.extend_from_slice(&msg);
-            r
+    let mut message = Vec::new();
+    let action: &[u8] = match resp {
+        PolicyResponse::Ok => b"OK",
+        PolicyResponse::Reject(msg) => {
+            message = msg;
+            b"REJECT"
         }
-        PolicyResponse::Defer => b"DEFER".to_vec(),
-        PolicyResponse::DeferWithMessage(msg) => {
-            let mut r = b"DEFER ".to_vec();
-            r.extend_from_slice(&msg);
-            r
+        PolicyResponse::Defer(msg) => {
+            message = msg;
+            b"DEFER"
         }
-        PolicyResponse::Dunno => b"DUNNO".to_vec(),
+        PolicyResponse::DeferIfReject(msg) => {
+            message = msg;
+            b"DEFER_IF_REJECT"
+        }
+        PolicyResponse::DeferIfPermit(msg) => {
+            message = msg;
+            b"DEFER_IF_PERMIT"
+        }
+        PolicyResponse::Bcc(email) => {
+            message = email;
+            b"BCC"
+        }
+        PolicyResponse::Discard(msg) => {
+            message = msg;
+            b"DISCARD"
+        }
+        PolicyResponse::Dunno => b"DUNNO",
+        PolicyResponse::Hold(msg) => {
+            message = msg;
+            b"HOLD"
+        }
+        PolicyResponse::Redirect(dst) => {
+            message = dst;
+            b"REDIRECT"
+        }
+        PolicyResponse::Info(msg) => {
+            message = msg;
+            b"INFO"
+        }
+        PolicyResponse::Warn(msg) => {
+            message = msg;
+            b"WARN"
+        }
+    };
+    let mut resp = Vec::from(action);
+    if message.len() != 0 {
+        resp.push(b' ');
+        resp.extend_from_slice(&message);
     }
+    resp
 }
 
 #[test]
 fn test_serialize_response() {
     assert_eq!(b"OK"[..], serialize_response(PolicyResponse::Ok)[..]);
-    assert_eq!(b"REJECT"[..], serialize_response(PolicyResponse::Reject)[..]);
+    assert_eq!(
+        b"REJECT"[..],
+        serialize_response(PolicyResponse::Reject(Vec::new()))[..]
+    );
     assert_eq!(
         b"REJECT asdf"[..],
-        serialize_response(PolicyResponse::RejectWithMessage(b"asdf".to_vec()))[..]
+        serialize_response(PolicyResponse::Reject(b"asdf".to_vec()))[..]
     );
-    assert_eq!(b"DEFER"[..], serialize_response(PolicyResponse::Defer)[..]);
+    assert_eq!(b"DEFER"[..], serialize_response(PolicyResponse::Defer(Vec::new()))[..]);
     assert_eq!(
         b"DEFER fdas"[..],
-        serialize_response(PolicyResponse::DeferWithMessage(b"fdas".to_vec()))[..]
+        serialize_response(PolicyResponse::Defer(b"fdas".to_vec()))[..]
+    );
+    assert_eq!(
+        b"DEFER_IF_REJECT"[..],
+        serialize_response(PolicyResponse::DeferIfReject(Vec::new()))[..]
+    );
+    assert_eq!(
+        b"DEFER_IF_REJECT blblblbl"[..],
+        serialize_response(PolicyResponse::DeferIfReject(b"blblblbl".to_vec()))[..]
+    );
+    assert_eq!(
+        b"DEFER_IF_PERMIT"[..],
+        serialize_response(PolicyResponse::DeferIfPermit(Vec::new()))[..]
+    );
+    assert_eq!(
+        b"DEFER_IF_PERMIT gsdk jf"[..],
+        serialize_response(PolicyResponse::DeferIfPermit(b"gsdk jf".to_vec()))[..]
+    );
+    assert_eq!(
+        b"BCC a@b.c"[..],
+        serialize_response(PolicyResponse::Bcc(b"a@b.c".to_vec()))[..]
+    );
+    assert_eq!(
+        b"DISCARD"[..],
+        serialize_response(PolicyResponse::Discard(Vec::new()))[..]
+    );
+    assert_eq!(
+        b"DISCARD asdffdas"[..],
+        serialize_response(PolicyResponse::Discard(b"asdffdas".to_vec()))[..]
     );
     assert_eq!(b"DUNNO"[..], serialize_response(PolicyResponse::Dunno)[..]);
+    assert_eq!(b"HOLD"[..], serialize_response(PolicyResponse::Hold(Vec::new()))[..]);
+    assert_eq!(
+        b"HOLD cmn,sd"[..],
+        serialize_response(PolicyResponse::Hold(b"cmn,sd".to_vec()))[..]
+    );
+    assert_eq!(
+        b"REDIRECT a@b.c"[..],
+        serialize_response(PolicyResponse::Redirect(b"a@b.c".to_vec()))[..]
+    );
+    assert_eq!(
+        b"INFO some message trololol"[..],
+        serialize_response(PolicyResponse::Info(b"some message trololol".to_vec()))[..]
+    );
+    assert_eq!(
+        b"WARN writing something to logs because logging is great and everyone should log everything"[..],
+        serialize_response(PolicyResponse::Warn(
+            b"writing something to logs because logging is great and everyone should log everything".to_vec()
+        ))[..]
+    );
 }
 
 pub fn handle_connection<'l, HandlerType, HandlerParamType, RS: BufRead, WS: Write>(
@@ -125,9 +215,9 @@ mod tests {
 
         fn response(self) -> PolicyResponse {
             if !self.found_request {
-                return PolicyResponse::Reject;
+                return PolicyResponse::Reject(Vec::new());
             }
-            PolicyResponse::DeferWithMessage(self.client_address.clone())
+            PolicyResponse::Defer(self.client_address.clone())
         }
     }
 
