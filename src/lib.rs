@@ -1,5 +1,3 @@
-
-
 /*!
 A Postfix SMTP access policy delegation handler. It handles protocol parsing and response sending to talk to Postfix
  */

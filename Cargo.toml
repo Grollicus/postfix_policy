@@ -6,5 +6,6 @@ edition = "2018"
 keywords = ["postfix", "policy", "email"]
 repository = "https://github.com/Grollicus/mailfilter"
 description = "A Postfix SMTP access policy delegation handler. It handles protocol parsing and response sending to talk to Postfix"
+license = "LGPL-3.0-or-later"
 
 [dependencies]
