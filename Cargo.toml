@@ -1,11 +1,16 @@
 [package]
 name = "postfix_policy"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Grollicus"]
 edition = "2018"
 keywords = ["postfix", "policy", "email"]
 repository = "https://github.com/Grollicus/postfix_policy"
-description = "A Postfix SMTP access policy delegation handler. It handles protocol parsing and response sending to talk to Postfix"
+documentation = "https://docs.rs/postfix_policy/"
+description = "A Postfix SMTP access policy delegation handler. It handles protocol parsing and response sending to talk to Postfix."
 license = "LGPL-3.0-or-later"
+include = [
+    "Cargo.toml",
+    "src/*.rs",
+]
 
 [dependencies]
