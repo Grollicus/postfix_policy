@@ -4,5 +4,7 @@ version = "0.1.0"
 authors = ["Grollicus"]
 edition = "2018"
 keywords = ["postfix", "policy", "email"]
+repository = "https://github.com/Grollicus/mailfilter"
+description = "A Postfix SMTP access policy delegation handler. It handles protocol parsing and response sending to talk to Postfix"
 
 [dependencies]

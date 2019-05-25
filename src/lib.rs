@@ -1,9 +1,16 @@
+
+
+/*!
+A Postfix SMTP access policy delegation handler. It handles protocol parsing and response sending to talk to Postfix
+ */
+
 use std::io::{BufRead, Write};
 
+/// Errors that can occur in this Crate
 #[derive(Debug)]
 pub enum PostfixPolicyError {
     IoError(std::io::Error),
-    InvalidLine(Vec<u8>),
+    ProtocolError(Vec<u8>),
 }
 
 impl std::convert::From<std::io::Error> for PostfixPolicyError {
@@ -12,6 +19,9 @@ impl std::convert::From<std::io::Error> for PostfixPolicyError {
     }
 }
 
+/// Encodes a response to the mail server.
+///
+/// For details see [`man 5 access`](http://www.postfix.org/access.5.html)
 #[derive(Debug, PartialEq)]
 pub enum PolicyResponse {
     Ok,
@@ -28,10 +38,18 @@ pub enum PolicyResponse {
     Warn(Vec<u8>),
 }
 
+/// Handler for policy requests.
+///
+/// Will be instanciated for every request by calling `new` with the `ctx` passed to [`handle_connection`].
+/// [`handle_connection`] will then call `attribute` for every attribute in the policy request and then `response` to get the response.
+///
+/// [`handle_connection`]: fn.handle_connection.html
 pub trait PolicyRequestHandler<'l, T> {
+    /// Creates a new instance and initalizes it with the context `T`.
     fn new(ctx: &'l T) -> Self;
-    fn parse_line(&mut self, name: &[u8], value: &[u8]);
-
+    /// Attribute `name` with value `value` was part of the request
+    fn attribute(&mut self, name: &[u8], value: &[u8]);
+    /// Returns the desired action after all attributes were processed
     fn response(self) -> PolicyResponse;
 }
 
@@ -155,15 +173,37 @@ fn test_serialize_response() {
     );
 }
 
+/**
+ Handles a connection to the mail server.
+
+ It will create a new instance of the given [`PolicyRequestHandler`] for every request, passing `ctx` to `PolicyRequestHandler::new`.
+ Might handle multiple policy requests before returning.
+ ## Example
+ ```norun
+     let listener = UnixListener::bind(socket_path).expect("Could not bind UNIX socket");
+     for conn in listener.incoming() {
+         let mut conn = conn?;
+         let clone = conn.try_clone()?;
+         let cfg_ref = &config;
+         thread::spawn(move || {
+             let reader = BufReader::new(clone);
+             if let Err(e) = handle_connection::<MyHandlerType, _, _, _>(reader, &mut conn, cfg_ref) {
+                 println!("handle_connection failed: {:?}", e);
+             };
+         });
+     }
+ ```
+ [`PolicyRequestHandler`]: trait.PolicyRequestHandler.html
+*/
 pub fn handle_connection<'l, HandlerType, HandlerParamType, RS: BufRead, WS: Write>(
     mut reader: RS,
     writer: &mut WS,
-    param: &'l HandlerParamType,
+    ctx: &'l HandlerParamType,
 ) -> Result<(), PostfixPolicyError>
 where
     HandlerType: PolicyRequestHandler<'l, HandlerParamType>,
 {
-    let mut ctx: HandlerType = HandlerType::new(param);
+    let mut handler: HandlerType = HandlerType::new(ctx);
 
     loop {
         let mut buf: Vec<u8> = vec![];
@@ -172,44 +212,58 @@ where
         }
 
         if buf == b"\n" {
-            let result = ctx.response();
+            let result = handler.response();
             writer.write_all(b"action=")?;
             writer.write_all(&serialize_response(result))?;
             writer.write_all(b"\n\n")?;
             writer.flush()?;
-            ctx = HandlerType::new(param);
+            handler = HandlerType::new(ctx);
             continue;
         }
 
         match buf.iter().position(|&c| c == b'=') {
-            None => return Err(PostfixPolicyError::InvalidLine(buf)),
+            None => return Err(PostfixPolicyError::ProtocolError(buf)),
             Some(pos) => {
                 let (left, mut right) = buf.split_at(pos);
                 if left.is_empty() || right.len() < 2 {
-                    return Err(PostfixPolicyError::InvalidLine(buf));
+                    return Err(PostfixPolicyError::ProtocolError(buf));
                 }
                 right = &right[1..right.len() - 1];
-                ctx.parse_line(left, right);
+                handler.attribute(left, right);
             }
         }
     }
 }
 
+/// provides the test helper `handle_connection_response`.
 pub mod test_helper {
     use super::{handle_connection, PolicyRequestHandler, PostfixPolicyError};
     use std::io::BufReader;
     use std::io::Cursor;
 
+    /// Helper function to test `PolicyRequestHandler` implementations using the line format.
+    /// Expects `input` to contain one (or more) policy requests. \
+    /// Will use `ctx` as context parameter in `handle_connection`. \
+    /// If `handle_connection` returns successfully, it returns `Ok(..)` containing the complete response(s) that would be sent to the mail server. \
+    /// If `handle_connection` fails, the Error response will be passed through and the response(s) up to that point are discarded.
+    /// ## Example
+    /// ```norun
+    /// let input = b"request=smtpd_access_policy\nprotocol_state=RCPT\n...\n\n";
+    /// assert_eq!(
+    ///     handle_connection_response::<DummyRequestHandler, _>(input, &()).unwrap(),
+    ///     b"action=DEFER 131.234.189.14\n\n"
+    /// );
+    /// ```
     pub fn handle_connection_response<'l, HandlerType, HandlerParamType>(
         input: &[u8],
-        config: &'l HandlerParamType,
+        ctx: &'l HandlerParamType,
     ) -> Result<Vec<u8>, PostfixPolicyError>
     where
         HandlerType: PolicyRequestHandler<'l, HandlerParamType>,
     {
         let reader = BufReader::new(input);
         let mut output = Cursor::new(vec![]);
-        handle_connection::<HandlerType, HandlerParamType, _, _>(reader, &mut output, config)?;
+        handle_connection::<HandlerType, HandlerParamType, _, _>(reader, &mut output, ctx)?;
         Ok(output.into_inner())
     }
 }
@@ -231,7 +285,7 @@ mod tests {
                 client_address: vec![],
             }
         }
-        fn parse_line(&mut self, name: &[u8], value: &[u8]) {
+        fn attribute(&mut self, name: &[u8], value: &[u8]) {
             match name {
                 b"request" => self.found_request = true,
                 b"client_address" => self.client_address = value.to_vec(),
@@ -271,7 +325,7 @@ mod tests {
         let input = b"asdf\n\n";
 
         assert!(match handle_connection_response::<DummyRequestHandler, _>(input, &()) {
-            Err(PostfixPolicyError::InvalidLine(l)) => {
+            Err(PostfixPolicyError::ProtocolError(l)) => {
                 assert_eq!(&l, b"asdf\n");
                 true
             }
@@ -284,7 +338,7 @@ mod tests {
         let input = b"=a\n\n";
 
         assert!(match handle_connection_response::<DummyRequestHandler, _>(input, &()) {
-            Err(PostfixPolicyError::InvalidLine(l)) => {
+            Err(PostfixPolicyError::ProtocolError(l)) => {
                 assert_eq!(&l, b"=a\n");
                 true
             }
