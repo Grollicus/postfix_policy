@@ -6,13 +6,14 @@ use std::io::{BufRead, Write};
 
 /// Errors that can occur in this Crate
 #[derive(Debug)]
-pub enum PostfixPolicyError {
+pub enum PostfixPolicyError<ErrorType> {
     IoError(std::io::Error),
     ProtocolError(Vec<u8>),
+    HandlerError(ErrorType),
 }
 
-impl std::convert::From<std::io::Error> for PostfixPolicyError {
-    fn from(e: std::io::Error) -> PostfixPolicyError {
+impl<ErrorType> std::convert::From<std::io::Error> for PostfixPolicyError<ErrorType> {
+    fn from(e: std::io::Error) -> Self {
         PostfixPolicyError::IoError(e)
     }
 }
@@ -42,13 +43,13 @@ pub enum PolicyResponse {
 /// [`handle_connection`] will then call `attribute` for every attribute in the policy request and then `response` to get the response.
 ///
 /// [`handle_connection`]: fn.handle_connection.html
-pub trait PolicyRequestHandler<'l, T> {
-    /// Creates a new instance and initalizes it with the context `T`.
-    fn new(ctx: &'l T) -> Self;
+pub trait PolicyRequestHandler<'l, ContextType, ErrorType> {
+    /// Creates a new instance and initalizes it with the context `ContextType`.
+    fn new(ctx: &'l ContextType) -> Self;
     /// Attribute `name` with value `value` was part of the request
-    fn attribute(&mut self, name: &[u8], value: &[u8]);
+    fn attribute(&mut self, name: &[u8], value: &[u8]) -> Option<ErrorType>;
     /// Returns the desired action after all attributes were processed
-    fn response(self) -> PolicyResponse;
+    fn response(self) -> Result<PolicyResponse, ErrorType>;
 }
 
 fn serialize_response(resp: PolicyResponse) -> Vec<u8> {
@@ -185,7 +186,7 @@ fn test_serialize_response() {
          let cfg_ref = &config;
          thread::spawn(move || {
              let reader = BufReader::new(clone);
-             if let Err(e) = handle_connection::<MyHandlerType, _, _, _>(reader, &mut conn, cfg_ref) {
+             if let Err(e) = handle_connection::<MyHandlerType, _, _, _, _>(reader, &mut conn, cfg_ref) {
                  println!("handle_connection failed: {:?}", e);
              };
          });
@@ -193,13 +194,13 @@ fn test_serialize_response() {
  ```
  [`PolicyRequestHandler`]: trait.PolicyRequestHandler.html
 */
-pub fn handle_connection<'l, HandlerType, HandlerParamType, RS: BufRead, WS: Write>(
+pub fn handle_connection<'l, HandlerType, ContextType, ErrorType, RS: BufRead, WS: Write>(
     mut reader: RS,
     writer: &mut WS,
-    ctx: &'l HandlerParamType,
-) -> Result<(), PostfixPolicyError>
+    ctx: &'l ContextType,
+) -> Result<(), PostfixPolicyError<ErrorType>>
 where
-    HandlerType: PolicyRequestHandler<'l, HandlerParamType>,
+    HandlerType: PolicyRequestHandler<'l, ContextType, ErrorType>,
 {
     let mut handler: HandlerType = HandlerType::new(ctx);
 
@@ -210,7 +211,10 @@ where
         }
 
         if buf == b"\n" {
-            let result = handler.response();
+            let result = match handler.response() {
+                Ok(result) => result,
+                Err(e) => return Err(PostfixPolicyError::HandlerError(e)),
+            };
             writer.write_all(b"action=")?;
             writer.write_all(&serialize_response(result))?;
             writer.write_all(b"\n\n")?;
@@ -227,7 +231,9 @@ where
                     return Err(PostfixPolicyError::ProtocolError(buf));
                 }
                 right = &right[1..right.len() - 1];
-                handler.attribute(left, right);
+                if let Some(error) = handler.attribute(left, right) {
+                    return Err(PostfixPolicyError::HandlerError(error));
+                }
             }
         }
     }
@@ -248,20 +254,20 @@ pub mod test_helper {
     /// ```norun
     /// let input = b"request=smtpd_access_policy\nprotocol_state=RCPT\n...\n\n";
     /// assert_eq!(
-    ///     handle_connection_response::<DummyRequestHandler, _>(input, &()).unwrap(),
+    ///     handle_connection_response::<DummyRequestHandler, _, ()>(input, &()).unwrap(),
     ///     b"action=DEFER 131.234.189.14\n\n"
     /// );
     /// ```
-    pub fn handle_connection_response<'l, HandlerType, HandlerParamType>(
+    pub fn handle_connection_response<'l, HandlerType, ContextType, ErrorType>(
         input: &[u8],
-        ctx: &'l HandlerParamType,
-    ) -> Result<Vec<u8>, PostfixPolicyError>
+        ctx: &'l ContextType,
+    ) -> Result<Vec<u8>, PostfixPolicyError<ErrorType>>
     where
-        HandlerType: PolicyRequestHandler<'l, HandlerParamType>,
+        HandlerType: PolicyRequestHandler<'l, ContextType, ErrorType>,
     {
         let reader = BufReader::new(input);
         let mut output = Cursor::new(vec![]);
-        handle_connection::<HandlerType, HandlerParamType, _, _>(reader, &mut output, ctx)?;
+        handle_connection::<HandlerType, ContextType, ErrorType, _, _>(reader, &mut output, ctx)?;
         Ok(output.into_inner())
     }
 }
@@ -276,26 +282,27 @@ mod tests {
         found_request: bool,
         client_address: Vec<u8>,
     }
-    impl<'l> PolicyRequestHandler<'l, ()> for DummyRequestHandler {
+    impl<'l> PolicyRequestHandler<'l, (), ()> for DummyRequestHandler {
         fn new(_: &()) -> Self {
             Self {
                 found_request: false,
                 client_address: vec![],
             }
         }
-        fn attribute(&mut self, name: &[u8], value: &[u8]) {
+        fn attribute(&mut self, name: &[u8], value: &[u8]) -> Option<()> {
             match name {
                 b"request" => self.found_request = true,
                 b"client_address" => self.client_address = value.to_vec(),
                 _ => {}
             }
+            None
         }
 
-        fn response(self) -> PolicyResponse {
+        fn response(self) -> Result<PolicyResponse, ()> {
             if !self.found_request {
-                return PolicyResponse::Reject(Vec::new());
+                return Ok(PolicyResponse::Reject(Vec::new()));
             }
-            PolicyResponse::Defer(self.client_address.clone())
+            Ok(PolicyResponse::Defer(self.client_address.clone()))
         }
     }
 
@@ -304,7 +311,7 @@ mod tests {
         let input =
             b"request=smtpd_access_policy\nprotocol_state=RCPT\nprotocol_name=ESMTP\nclient_address=131.234.189.14\n\n";
         assert_eq!(
-            handle_connection_response::<DummyRequestHandler, _>(input, &()).unwrap(),
+            handle_connection_response::<DummyRequestHandler, _, _>(input, &()).unwrap(),
             b"action=DEFER 131.234.189.14\n\n"
         );
     }
@@ -313,7 +320,7 @@ mod tests {
     fn test_handle_connection_empty() {
         let input = b"\n";
         assert_eq!(
-            handle_connection_response::<DummyRequestHandler, _>(input, &()).unwrap(),
+            handle_connection_response::<DummyRequestHandler, _, _>(input, &()).unwrap(),
             b"action=REJECT\n\n"
         );
     }
@@ -322,7 +329,7 @@ mod tests {
     fn test_handle_connection_line_without_eq() {
         let input = b"asdf\n\n";
 
-        assert!(match handle_connection_response::<DummyRequestHandler, _>(input, &()) {
+        assert!(match handle_connection_response::<DummyRequestHandler, _, _>(input, &()) {
             Err(PostfixPolicyError::ProtocolError(l)) => {
                 assert_eq!(&l, b"asdf\n");
                 true
@@ -335,7 +342,7 @@ mod tests {
     fn test_handle_connection_line_empty_name() {
         let input = b"=a\n\n";
 
-        assert!(match handle_connection_response::<DummyRequestHandler, _>(input, &()) {
+        assert!(match handle_connection_response::<DummyRequestHandler, _, _>(input, &()) {
             Err(PostfixPolicyError::ProtocolError(l)) => {
                 assert_eq!(&l, b"=a\n");
                 true
