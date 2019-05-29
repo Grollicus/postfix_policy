@@ -255,9 +255,9 @@ where
 /// provides helpers for testing
 pub mod test_helper {
     use super::{handle_connection, PolicyRequestHandler, PostfixPolicyError};
-    use std::io::{Read, Write};
-    use std::io::Cursor;
     use std::cell::RefCell;
+    use std::io::Cursor;
+    use std::io::{Read, Write};
 
     /// A Dummy Socket, implementing `Read` and `Write`. It is give an `&[u8]` input which will be returned by `read` calls. After using it, the complete written output can be obtained by calling `get_output`.
     pub struct DummySocket<'lt> {
@@ -380,25 +380,29 @@ mod tests {
     fn test_handle_connection_line_without_eq() {
         let input = b"asdf\n\n";
 
-        assert!(match handle_connection_response::<DummyRequestHandler, _, _>(input, &()) {
-            Err(PostfixPolicyError::ProtocolError(l)) => {
-                assert_eq!(&l, b"asdf\n");
-                true
+        assert!(
+            match handle_connection_response::<DummyRequestHandler, _, _>(input, &()) {
+                Err(PostfixPolicyError::ProtocolError(l)) => {
+                    assert_eq!(&l, b"asdf\n");
+                    true
+                }
+                _ => false,
             }
-            _ => false,
-        });
+        );
     }
 
     #[test]
     fn test_handle_connection_line_empty_name() {
         let input = b"=a\n\n";
 
-        assert!(match handle_connection_response::<DummyRequestHandler, _, _>(input, &()) {
-            Err(PostfixPolicyError::ProtocolError(l)) => {
-                assert_eq!(&l, b"=a\n");
-                true
+        assert!(
+            match handle_connection_response::<DummyRequestHandler, _, _>(input, &()) {
+                Err(PostfixPolicyError::ProtocolError(l)) => {
+                    assert_eq!(&l, b"=a\n");
+                    true
+                }
+                _ => false,
             }
-            _ => false,
-        });
+        );
     }
 }
