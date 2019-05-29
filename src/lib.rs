@@ -7,8 +7,13 @@ use std::io::{BufRead, Write};
 /// Errors that can occur in this Crate
 #[derive(Debug)]
 pub enum PostfixPolicyError<ErrorType> {
+    /// An IO error occured while sending or receiving.
     IoError(std::io::Error),
+    /// The request sent by the server contained an error.
     ProtocolError(Vec<u8>),
+    /// one of the [`PolicyRequestHandler`] methods indicated an error.
+    ///
+    /// [`PolicyRequestHandler`]: trait.PolicyRequestHandler.html
     HandlerError(ErrorType),
 }
 
@@ -46,9 +51,17 @@ pub enum PolicyResponse {
 pub trait PolicyRequestHandler<'l, ContextType, ErrorType> {
     /// Creates a new instance and initalizes it with the context `ContextType`.
     fn new(ctx: &'l ContextType) -> Self;
-    /// Attribute `name` with value `value` was part of the request
+    /// Attribute `name` with value `value` was part of the request. If this method returns `Some(error)`,
+    /// handling of the request is cancelled immediately and [`handle_connection`] will return `Err(error)`.
+    /// If this method returns `None`, request handling will continue normally.
+    ///
+    /// [`handle_connection`]: fn.handle_connection.html
     fn attribute(&mut self, name: &[u8], value: &[u8]) -> Option<ErrorType>;
-    /// Returns the desired action after all attributes were processed
+    /// Returns the desired action after all attributes were processed. If this method returns `Err(error)`,
+    /// handling of the request is cancelled immediately and [`handle_connection`] will return `Err(error)`.
+    /// If this method returns `Ok(policy_response)`, the `policy_response` will be sent to the Server. This completes the request.
+    ///
+    /// [`handle_connection`]: fn.handle_connection.html
     fn response(self) -> Result<PolicyResponse, ErrorType>;
 }
 
@@ -245,7 +258,7 @@ pub mod test_helper {
     use std::io::BufReader;
     use std::io::Cursor;
 
-    /// Helper function to test `PolicyRequestHandler` implementations using the line format.
+    /// Helper function to test [`PolicyRequestHandler`] implementations using the line format.
     /// Expects `input` to contain one (or more) policy requests. \
     /// Will use `ctx` as context parameter in `handle_connection`. \
     /// If `handle_connection` returns successfully, it returns `Ok(..)` containing the complete response(s) that would be sent to the mail server. \
@@ -254,10 +267,12 @@ pub mod test_helper {
     /// ```norun
     /// let input = b"request=smtpd_access_policy\nprotocol_state=RCPT\n...\n\n";
     /// assert_eq!(
-    ///     handle_connection_response::<DummyRequestHandler, _, ()>(input, &()).unwrap(),
-    ///     b"action=DEFER 131.234.189.14\n\n"
+    ///     handle_connection_response::<MyRequestHandler, _, ()>(input, &()).unwrap(),
+    ///     b"action=DEFER some_message\n\n"
     /// );
     /// ```
+    ///
+    /// [`PolicyRequestHandler`]: ../trait.PolicyRequestHandler.html
     pub fn handle_connection_response<'l, HandlerType, ContextType, ErrorType>(
         input: &[u8],
         ctx: &'l ContextType,
