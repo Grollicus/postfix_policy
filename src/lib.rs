@@ -2,7 +2,7 @@
 A Postfix SMTP access policy delegation handler. It handles protocol parsing and response sending to talk to Postfix
  */
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 
 /// Errors that can occur in this Crate
 #[derive(Debug)]
@@ -188,18 +188,17 @@ fn test_serialize_response() {
 /**
  Handles a connection to the mail server.
 
- It will create a new instance of the given [`PolicyRequestHandler`] for every request, passing `ctx` to `PolicyRequestHandler::new`.
+ `socket` is the connection to the mail server and `ctx` is the Context, passed through each time `PolicyRequestHandler::new` is called.\
+ It will create a new instance of the given [`PolicyRequestHandler`] for every request.\
  Might handle multiple policy requests before returning.
  ## Example
  ```norun
      let listener = UnixListener::bind(socket_path).expect("Could not bind UNIX socket");
      for conn in listener.incoming() {
          let mut conn = conn?;
-         let clone = conn.try_clone()?;
          let cfg_ref = &config;
          thread::spawn(move || {
-             let reader = BufReader::new(clone);
-             if let Err(e) = handle_connection::<MyHandlerType, _, _, _, _>(reader, &mut conn, cfg_ref) {
+             if let Err(e) = handle_connection::<MyHandlerType, _, _, _>(&mut conn, cfg_ref) {
                  println!("handle_connection failed: {:?}", e);
              };
          });
@@ -207,15 +206,16 @@ fn test_serialize_response() {
  ```
  [`PolicyRequestHandler`]: trait.PolicyRequestHandler.html
 */
-pub fn handle_connection<'l, HandlerType, ContextType, ErrorType, RS: BufRead, WS: Write>(
-    mut reader: RS,
-    writer: &mut WS,
-    ctx: &'l ContextType,
+pub fn handle_connection<'socket, 'ctx, HandlerType, ContextType, ErrorType, SocketType>(
+    mut socket: &'socket SocketType,
+    ctx: &'ctx ContextType,
 ) -> Result<(), PostfixPolicyError<ErrorType>>
 where
-    HandlerType: PolicyRequestHandler<'l, ContextType, ErrorType>,
+    HandlerType: PolicyRequestHandler<'ctx, ContextType, ErrorType>,
+    &'socket SocketType: Read + Write,
 {
     let mut handler: HandlerType = HandlerType::new(ctx);
+    let mut reader = BufReader::new(socket);
 
     loop {
         let mut buf: Vec<u8> = vec![];
@@ -228,10 +228,10 @@ where
                 Ok(result) => result,
                 Err(e) => return Err(PostfixPolicyError::HandlerError(e)),
             };
-            writer.write_all(b"action=")?;
-            writer.write_all(&serialize_response(result))?;
-            writer.write_all(b"\n\n")?;
-            writer.flush()?;
+            socket.write_all(b"action=")?;
+            socket.write_all(&serialize_response(result))?;
+            socket.write_all(b"\n\n")?;
+            socket.flush()?;
             handler = HandlerType::new(ctx);
             continue;
         }
@@ -252,11 +252,48 @@ where
     }
 }
 
-/// provides the test helper `handle_connection_response`.
+/// provides helpers for testing
 pub mod test_helper {
     use super::{handle_connection, PolicyRequestHandler, PostfixPolicyError};
-    use std::io::BufReader;
+    use std::io::{Read, Write};
     use std::io::Cursor;
+    use std::cell::RefCell;
+
+    /// A Dummy Socket, implementing `Read` and `Write`. It is give an `&[u8]` input which will be returned by `read` calls. After using it, the complete written output can be obtained by calling `get_output`.
+    pub struct DummySocket<'lt> {
+        input: RefCell<Cursor<&'lt [u8]>>,
+        output: RefCell<Vec<u8>>,
+    }
+
+    impl<'lt> DummySocket<'lt> {
+        /// creates a new `DummySocket` instance. The data given as `input` can be read by calling `read`.
+        pub fn new(input: &'lt [u8]) -> Self {
+            DummySocket {
+                input: RefCell::new(Cursor::new(input)),
+                output: RefCell::new(vec![]),
+            }
+        }
+
+        /// returns the output written into this `DummySocket`.
+        pub fn get_output(self) -> Vec<u8> {
+            self.output.into_inner()
+        }
+    }
+
+    impl<'lt> Read for &DummySocket<'lt> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.input.borrow_mut().read(buf)
+        }
+    }
+
+    impl<'lt> Write for &DummySocket<'lt> {
+        fn write(&mut self, buf: &[u8]) -> std::result::Result<usize, std::io::Error> {
+            self.output.borrow_mut().write(buf)
+        }
+        fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
+            self.output.borrow_mut().flush()
+        }
+    }
 
     /// Helper function to test [`PolicyRequestHandler`] implementations using the line format.
     /// Expects `input` to contain one (or more) policy requests. \
@@ -267,23 +304,22 @@ pub mod test_helper {
     /// ```norun
     /// let input = b"request=smtpd_access_policy\nprotocol_state=RCPT\n...\n\n";
     /// assert_eq!(
-    ///     handle_connection_response::<MyRequestHandler, _, ()>(input, &()).unwrap(),
+    ///     handle_connection_response::<MyRequestHandler, _, _>(input, &()).unwrap(),
     ///     b"action=DEFER some_message\n\n"
     /// );
     /// ```
     ///
     /// [`PolicyRequestHandler`]: ../trait.PolicyRequestHandler.html
     pub fn handle_connection_response<'l, HandlerType, ContextType, ErrorType>(
-        input: &[u8],
+        input: &'l [u8],
         ctx: &'l ContextType,
     ) -> Result<Vec<u8>, PostfixPolicyError<ErrorType>>
     where
         HandlerType: PolicyRequestHandler<'l, ContextType, ErrorType>,
     {
-        let reader = BufReader::new(input);
-        let mut output = Cursor::new(vec![]);
-        handle_connection::<HandlerType, ContextType, ErrorType, _, _>(reader, &mut output, ctx)?;
-        Ok(output.into_inner())
+        let socket = DummySocket::new(input);
+        handle_connection::<HandlerType, ContextType, ErrorType, _>(&socket, ctx)?;
+        Ok(socket.get_output())
     }
 }
 
